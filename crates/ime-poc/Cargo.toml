@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 ime-core.workspace = true
 ime-ibus.workspace = true
+ime-fcitx4.workspace = true
 ime-fcitx5.workspace = true
 crossbeam-channel.workspace = true
 log.workspace = true

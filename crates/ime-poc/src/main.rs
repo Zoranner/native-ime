@@ -1,6 +1,6 @@
 //! native-ime Linux PoC
 //!
-//! 用途：在 Linux 环境验证 IBus / Fcitx5 连接，无需任何 GUI 框架。
+//! 用途：在 Linux 环境验证 IBus / Fcitx 4 / Fcitx5 连接，无需任何 GUI 框架。
 //! 用法：
 //!   RUST_LOG=debug cargo run -p ime-poc
 //!
@@ -19,12 +19,17 @@ async fn main() {
 
     let (engine, backend_name) = match try_fcitx5().await {
         Some(r) => r,
-        None => match try_ibus().await {
+        None => match try_fcitx4().await {
             Some(r) => r,
-            None => {
-                log::error!("[POC] No IME framework available (Fcitx5 / IBus). Exiting.");
-                return;
-            }
+            None => match try_ibus().await {
+                Some(r) => r,
+                None => {
+                    log::error!(
+                        "[POC] No IME framework available (Fcitx5 / Fcitx 4 / IBus). Exiting."
+                    );
+                    return;
+                }
+            },
         },
     };
 
@@ -128,6 +133,20 @@ async fn try_fcitx5() -> Option<(ImeEngine, &'static str)> {
         }
         Err(e) => {
             log::debug!("[POC] Fcitx5 not available: {}", e);
+            None
+        }
+    }
+}
+
+async fn try_fcitx4() -> Option<(ImeEngine, &'static str)> {
+    let (event_tx, event_rx) = crossbeam_channel::bounded(64);
+    match ime_fcitx4::Fcitx4Backend::connect(event_tx).await {
+        Ok(backend) => {
+            let engine = ImeEngine::new(Box::new(backend), event_rx);
+            Some((engine, "Fcitx 4"))
+        }
+        Err(e) => {
+            log::debug!("[POC] Fcitx 4 not available: {}", e);
             None
         }
     }

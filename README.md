@@ -4,7 +4,7 @@ Linux 原生 IME 客户端桥接库，供嵌入自定义渲染循环的宿主应
 
 目标场景：游戏引擎（Bevy、Godot 等）、跨平台 UI 框架、离屏渲染器（CEF OSR、WebView2 等）、
 以及任何自己管理渲染但需要系统输入法支持的应用。这类应用无法直接走 Wayland / X11
-窗口系统的 IME 协议（因为没有真正的系统窗口），本库通过 D-Bus 直连 IBus / Fcitx5，
+窗口系统的 IME 协议（因为没有真正的系统窗口），本库通过 D-Bus 直连 IBus / Fcitx 4 / Fcitx5，
 完全绕开窗口系统约束。
 
 ## 架构
@@ -13,6 +13,7 @@ Linux 原生 IME 客户端桥接库，供嵌入自定义渲染循环的宿主应
 crates/
   ime-core/    核心类型与 backend trait（ImeEvent, ImeBackend, ImeEngine）
   ime-ibus/    IBus D-Bus backend（GNOME / Ubuntu）
+  ime-fcitx4/  Fcitx 4 D-Bus backend（Kylin V10 / Sogou IME 等旧版环境）
   ime-fcitx5/  Fcitx5 D-Bus backend（KDE / Arch）
   ime-ffi/     C ABI 导出层 → 编译产物 libnative_ime.so
   ime-poc/     命令行验证程序（无 GUI，直接测试 Preedit / Commit 流程）
@@ -24,7 +25,7 @@ crates/
 
 | 函数 | 说明 |
 |------|------|
-| `ime_create()` | 自动检测 Fcitx5 / IBus，返回不透明句柄；失败返回 null |
+| `ime_create()` | 自动检测 Fcitx5 / Fcitx 4 / IBus，返回不透明句柄；失败返回 null |
 | `ime_destroy(handle)` | 销毁句柄，释放所有资源 |
 | `ime_focus_in(handle)` | 通知输入法获得焦点 |
 | `ime_focus_out(handle)` | 通知输入法失去焦点 |
@@ -48,7 +49,7 @@ crates/
 | 4 | DeleteSurroundingText | param1 = before, param2 = after |
 | 5 | ForwardKey | param1 = keysym, param2 = state |
 
-## Rust API（ime-core / ime-ibus / ime-fcitx5）
+## Rust API（ime-core / ime-ibus / ime-fcitx4 / ime-fcitx5）
 
 如果宿主本身是 Rust 项目，可以直接依赖这些 crate，绕过 C ABI：
 
@@ -56,6 +57,7 @@ crates/
 [dependencies]
 ime-core = { path = "..." }
 ime-ibus = { path = "..." }
+ime-fcitx4 = { path = "..." }
 ime-fcitx5 = { path = "..." }
 ```
 
@@ -88,7 +90,7 @@ cargo zigbuild --release -p ime-ffi --target x86_64-unknown-linux-gnu
 # 产物：target/x86_64-unknown-linux-gnu/release/libnative_ime.so
 ```
 
-运行 PoC（在 Linux 上验证 IBus / Fcitx5 连接）：
+运行 PoC（在 Linux 上验证 IBus / Fcitx 4 / Fcitx5 连接）：
 
 ```bash
 RUST_LOG=debug cargo run -p ime-poc
@@ -96,7 +98,7 @@ RUST_LOG=debug cargo run -p ime-poc
 
 ## 回退机制
 
-`ime_create` 在检测不到 IBus / Fcitx5 时返回 null，宿主应据此回退到自己的 IME 处理路径。
+`ime_create` 在检测不到 IBus / Fcitx 4 / Fcitx5 时返回 null，宿主应据此回退到自己的 IME 处理路径。
 
 在 EmbeddedBrowser Unity 端，`NativeImeBridge` 只在 Linux Editor / Linux Player 中尝试加载
 `libnative_ime.so`。插件缺失、符号不匹配或 `ime_create` 返回 null 时，会继续使用现有
@@ -105,6 +107,10 @@ RUST_LOG=debug cargo run -p ime-poc
 ## 当前限制
 
 - Fcitx5 backend 已接通 `set_surrounding_text`、光标矩形、按键处理和 Preedit / Commit 事件。
+- Fcitx 4 backend 已接通光标矩形、按键处理和 Preedit / Commit 事件。Fcitx 4 的
+  InputContext 绑定创建它的 D-Bus sender，因此必须由库内部复用同一个连接创建上下文、
+  调用方法和接收信号；用 `dbus-send` 分多次手工调用 `/inputcontext_*` 会触发
+  `Invalid sender`，不代表 backend 不可用。
 - IBus backend 已接通光标矩形、按键处理和 Preedit / Commit 事件；`set_surrounding_text`
   当前明确降级为 no-op。
 - `DeleteSurroundingText` 已从 native-ime 透出到 Unity adapter，但尚未映射到浏览器文本编辑操作。

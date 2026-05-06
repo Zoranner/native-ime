@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 ime-core.workspace = true
 ime-ibus.workspace = true
+ime-fcitx4.workspace = true
 ime-fcitx5.workspace = true
 log.workspace = true
 crossbeam-channel.workspace = true

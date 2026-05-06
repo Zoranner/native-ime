@@ -12,7 +12,7 @@ pub struct ImeHandle {
 impl ImeHandle {
     /// 自动检测输入法框架并创建句柄
     ///
-    /// 检测顺序：Fcitx5 → IBus → 失败返回 None
+    /// 检测顺序：Fcitx5 → Fcitx 4 → IBus → 失败返回 None
     pub fn create() -> Option<Self> {
         // 2 个 worker 线程：一个供信号循环 + 普通 async 任务，另一个供 process_key_event
         // 内部的 spawn + sync_channel recv 不阻塞 tokio 调度器
@@ -33,11 +33,15 @@ impl ImeHandle {
                 log::info!("[native-ime] Using Fcitx5 backend");
                 return Some(backend);
             }
+            if let Some(backend) = try_fcitx4(event_tx.clone()).await {
+                log::info!("[native-ime] Using Fcitx 4 backend");
+                return Some(backend);
+            }
             if let Some(backend) = try_ibus(event_tx.clone()).await {
                 log::info!("[native-ime] Using IBus backend");
                 return Some(backend);
             }
-            log::warn!("[native-ime] No IME framework detected (Fcitx5 / IBus)");
+            log::warn!("[native-ime] No IME framework detected (Fcitx5 / Fcitx 4 / IBus)");
             None
         });
 
@@ -91,6 +95,16 @@ async fn try_fcitx5(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeB
         Ok(backend) => Some(Box::new(backend)),
         Err(e) => {
             log::debug!("[native-ime] Fcitx5 not available: {}", e);
+            None
+        }
+    }
+}
+
+async fn try_fcitx4(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeBackend>> {
+    match ime_fcitx4::Fcitx4Backend::connect(event_tx).await {
+        Ok(backend) => Some(Box::new(backend)),
+        Err(e) => {
+            log::debug!("[native-ime] Fcitx 4 not available: {}", e);
             None
         }
     }

@@ -2,6 +2,7 @@
 members = [
     "crates/ime-core",
     "crates/ime-ibus",
+    "crates/ime-fcitx4",
     "crates/ime-fcitx5",
     "crates/ime-ffi",
     "crates/ime-poc",
@@ -16,6 +17,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 ime-core = { path = "crates/ime-core" }
 ime-ibus = { path = "crates/ime-ibus" }
+ime-fcitx4 = { path = "crates/ime-fcitx4" }
 ime-fcitx5 = { path = "crates/ime-fcitx5" }
 log = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

@@ -358,6 +358,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ime-fcitx4"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "futures-util",
+ "ime-core",
+ "log",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "ime-fcitx5"
 version = "0.1.0"
 dependencies = [
@@ -377,6 +390,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "ime-core",
+ "ime-fcitx4",
  "ime-fcitx5",
  "ime-ibus",
  "log",
@@ -403,6 +417,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "ime-core",
+ "ime-fcitx4",
  "ime-fcitx5",
  "ime-ibus",
  "log",
