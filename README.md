@@ -1,0 +1,111 @@
+# native-ime
+
+Linux 原生 IME 客户端桥接库，供嵌入自定义渲染循环的宿主应用使用。
+
+目标场景：游戏引擎（Bevy、Godot 等）、跨平台 UI 框架、离屏渲染器（CEF OSR、WebView2 等）、
+以及任何自己管理渲染但需要系统输入法支持的应用。这类应用无法直接走 Wayland / X11
+窗口系统的 IME 协议（因为没有真正的系统窗口），本库通过 D-Bus 直连 IBus / Fcitx5，
+完全绕开窗口系统约束。
+
+## 架构
+
+```
+crates/
+  ime-core/    核心类型与 backend trait（ImeEvent, ImeBackend, ImeEngine）
+  ime-ibus/    IBus D-Bus backend（GNOME / Ubuntu）
+  ime-fcitx5/  Fcitx5 D-Bus backend（KDE / Arch）
+  ime-ffi/     C ABI 导出层 → 编译产物 libnative_ime.so
+  ime-poc/     命令行验证程序（无 GUI，直接测试 Preedit / Commit 流程）
+```
+
+## C ABI（ime-ffi）
+
+适合从任何能调用 C 共享库的语言使用（C#、Python、Lua、GDScript 等）。
+
+| 函数 | 说明 |
+|------|------|
+| `ime_create()` | 自动检测 Fcitx5 / IBus，返回不透明句柄；失败返回 null |
+| `ime_destroy(handle)` | 销毁句柄，释放所有资源 |
+| `ime_focus_in(handle)` | 通知输入法获得焦点 |
+| `ime_focus_out(handle)` | 通知输入法失去焦点 |
+| `ime_set_cursor_rect(handle, x, y, w, h)` | 提供光标位置，供输入法定位候选窗 |
+| `ime_set_surrounding_text(handle, text, cursor, anchor)` | 提供光标周围文本上下文 |
+| `ime_reset(handle)` | 重置输入状态 |
+| `ime_process_key_event(handle, keysym, keycode, state, is_release)` | 转发按键（X11 keysym），返回 1 = 输入法已消费 |
+| `ime_poll_event(handle, out_data)` | 取出下一个 IME 事件（Preedit / Commit 等），返回 0 = 无事件 |
+
+`ime_process_key_event` 接受 **X11 keysym**（如字母 `'a'` = `0x0061`，回车 `0xff0d`）。
+宿主负责将自身的按键表示转换为 keysym；每种框架只需维护一份转换映射。
+
+### 事件类型（ime_poll_event 返回值）
+
+| 值 | 类型 | 有效字段 |
+|----|------|----------|
+| 0 | 无事件 | — |
+| 1 | Preedit | text, cursor_begin, cursor_end |
+| 2 | PreeditEnd | — |
+| 3 | Commit | text |
+| 4 | DeleteSurroundingText | param1 = before, param2 = after |
+| 5 | ForwardKey | param1 = keysym, param2 = state |
+
+## Rust API（ime-core / ime-ibus / ime-fcitx5）
+
+如果宿主本身是 Rust 项目，可以直接依赖这些 crate，绕过 C ABI：
+
+```toml
+[dependencies]
+ime-core = { path = "..." }
+ime-ibus = { path = "..." }
+ime-fcitx5 = { path = "..." }
+```
+
+使用 `ImeBackend` trait 和 `ImeEngine` 即可，不需要引入 `ime-ffi`。
+
+## 构建
+
+需要 Rust 工具链（[rustup.rs](https://rustup.rs)）。D-Bus 依赖仅在 Linux 上有效。
+
+Linux 本机构建（C ABI 共享库）：
+
+```bash
+cargo build --release -p ime-ffi
+# 产物：target/release/libnative_ime.so
+```
+
+Unity Linux 插件放置路径固定为：
+
+```text
+BrowserRenderer/Assets/Packages/Plugins/Linux/libnative_ime.so
+```
+
+构建完成后将 `libnative_ime.so` 复制到该目录。Unity 导入配置仅启用 Linux Editor
+和 Linux x86_64 Player，不会影响 Windows 链路。
+
+Linux 从 Windows 交叉编译（需要 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)）：
+
+```powershell
+cargo zigbuild --release -p ime-ffi --target x86_64-unknown-linux-gnu
+# 产物：target/x86_64-unknown-linux-gnu/release/libnative_ime.so
+```
+
+运行 PoC（在 Linux 上验证 IBus / Fcitx5 连接）：
+
+```bash
+RUST_LOG=debug cargo run -p ime-poc
+```
+
+## 回退机制
+
+`ime_create` 在检测不到 IBus / Fcitx5 时返回 null，宿主应据此回退到自己的 IME 处理路径。
+
+在 EmbeddedBrowser Unity 端，`NativeImeBridge` 只在 Linux Editor / Linux Player 中尝试加载
+`libnative_ime.so`。插件缺失、符号不匹配或 `ime_create` 返回 null 时，会继续使用现有
+`ImeModule` 的 Unity IME 路径。
+
+## 当前限制
+
+- Fcitx5 backend 已接通 `set_surrounding_text`、光标矩形、按键处理和 Preedit / Commit 事件。
+- IBus backend 已接通光标矩形、按键处理和 Preedit / Commit 事件；`set_surrounding_text`
+  当前明确降级为 no-op。
+- `DeleteSurroundingText` 已从 native-ime 透出到 Unity adapter，但尚未映射到浏览器文本编辑操作。
+- 当前 Unity 接入是 Linux-only 增强路径，不替换 Windows 或现有共享内存 IME 协议。

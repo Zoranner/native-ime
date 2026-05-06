@@ -1,0 +1,10 @@
+[package]
+name = "ime-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform IME core abstractions"
+
+[dependencies]
+log.workspace = true
+crossbeam-channel.workspace = true

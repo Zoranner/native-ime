@@ -1,0 +1,19 @@
+[package]
+name = "ime-poc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux PoC: verify Preedit/Commit/CursorRect via IBus or Fcitx5"
+
+[[bin]]
+name = "ime-poc"
+path = "src/main.rs"
+
+[dependencies]
+ime-core.workspace = true
+ime-ibus.workspace = true
+ime-fcitx5.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+env_logger = "0.11"

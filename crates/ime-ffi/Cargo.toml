@@ -1,0 +1,21 @@
+[package]
+name = "ime-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI export layer for native-ime Unity plugin"
+
+[lib]
+name = "native_ime"
+crate-type = ["cdylib"]
+
+[dependencies]
+ime-core.workspace = true
+ime-ibus.workspace = true
+ime-fcitx5.workspace = true
+log.workspace = true
+crossbeam-channel.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+env_logger = "0.11"
