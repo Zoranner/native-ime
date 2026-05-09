@@ -135,7 +135,13 @@ cargo zigbuild --release -p ime-ffi --target x86_64-unknown-linux-gnu
 
 ```bash
 RUST_LOG=debug cargo run -p ime-poc
+# 手动输入文本行并逐键发送：
+RUST_LOG=debug cargo run -p ime-poc -- --interactive
 ```
+
+PoC 启动后会打印当前 backend 名称、backend kind 和 capability bits；默认模式仍自动发送
+`nihao + Return`，interactive 模式只做基础 X11 keysym 映射：ASCII 字符直接使用码位，
+Return 使用 `0xff0d`，不尝试覆盖完整键盘布局。
 
 ## 回退机制
 
