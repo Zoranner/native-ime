@@ -31,12 +31,53 @@ crates/
 | `ime_focus_out(handle)` | 通知输入法失去焦点 |
 | `ime_set_cursor_rect(handle, x, y, w, h)` | 提供光标位置，供输入法定位候选窗 |
 | `ime_set_surrounding_text(handle, text, cursor, anchor)` | 提供光标周围文本上下文 |
+| `ime_backend_kind(handle)` | 返回当前 backend 类型；null 返回 0 |
+| `ime_capabilities(handle)` | 返回当前 backend 能力位；null 返回 0 |
+| `ime_set_content_type(handle, type)` | 设置输入类型提示；null 或未知 type 会被忽略 |
 | `ime_reset(handle)` | 重置输入状态 |
 | `ime_process_key_event(handle, keysym, keycode, state, is_release)` | 转发按键（X11 keysym），返回 1 = 输入法已消费 |
 | `ime_poll_event(handle, out_data)` | 取出下一个 IME 事件（Preedit / Commit 等），返回 0 = 无事件 |
 
 `ime_process_key_event` 接受 **X11 keysym**（如字母 `'a'` = `0x0061`，回车 `0xff0d`）。
 宿主负责将自身的按键表示转换为 keysym；每种框架只需维护一份转换映射。
+
+### backend 类型与能力位
+
+`ime_backend_kind` 返回值：
+
+| 值 | backend |
+|----|---------|
+| 0 | None / Unknown |
+| 1 | Fcitx5 |
+| 2 | Fcitx 4 |
+| 3 | IBus |
+
+`ime_capabilities` 返回 `u32` 位集合：
+
+| 位 | 能力 |
+|----|------|
+| bit 0 | Preedit event |
+| bit 1 | Commit event |
+| bit 2 | ForwardKey event |
+| bit 3 | DeleteSurroundingText event |
+| bit 4 | `ime_set_surrounding_text` |
+| bit 5 | `ime_set_content_type` |
+
+当前 Fcitx5 声明 Preedit / Commit / ForwardKey / surrounding text；Fcitx 4 声明
+Preedit / Commit / ForwardKey / DeleteSurroundingText / surrounding text；IBus 声明
+Preedit / Commit / ForwardKey / DeleteSurroundingText / surrounding text / content type。
+未知 `type` 枚举值会被忽略。
+
+`ime_set_content_type` 的 `type` 值：
+
+| 值 | 类型 |
+|----|------|
+| 0 | Normal |
+| 1 | Password |
+| 2 | Number |
+| 3 | Phone |
+| 4 | Url |
+| 5 | Email |
 
 ### 事件类型（ime_poll_event 返回值）
 
@@ -107,11 +148,12 @@ RUST_LOG=debug cargo run -p ime-poc
 ## 当前限制
 
 - Fcitx5 backend 已接通 `set_surrounding_text`、光标矩形、按键处理和 Preedit / Commit 事件。
-- Fcitx 4 backend 已接通光标矩形、按键处理和 Preedit / Commit 事件。Fcitx 4 的
+- Fcitx 4 backend 已接通 `set_surrounding_text`、光标矩形、按键处理和 Preedit / Commit 事件。Fcitx 4 的
   InputContext 绑定创建它的 D-Bus sender，因此必须由库内部复用同一个连接创建上下文、
   调用方法和接收信号；用 `dbus-send` 分多次手工调用 `/inputcontext_*` 会触发
   `Invalid sender`，不代表 backend 不可用。
-- IBus backend 已接通光标矩形、按键处理和 Preedit / Commit 事件；`set_surrounding_text`
-  当前明确降级为 no-op。
-- `DeleteSurroundingText` 已从 native-ime 透出到 Unity adapter，但尚未映射到浏览器文本编辑操作。
+- IBus backend 已接通 `set_surrounding_text`、`set_content_type`、光标矩形、按键处理和
+  Preedit / Commit 事件。
+- `DeleteSurroundingText` 已从 native-ime 透出到 Unity adapter，并通过 HeadlessBrowser IME
+  队列映射为 Backspace / Delete 键事件。
 - 当前 Unity 接入是 Linux-only 增强路径，不替换 Windows 或现有共享内存 IME 协议。

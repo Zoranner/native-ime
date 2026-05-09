@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use crossbeam_channel::Sender;
 use futures_util::StreamExt;
-use ime_core::{CursorRect, ImeBackend, ImeEvent, KeyState};
+use ime_core::{BackendKind, CursorRect, ImeBackend, ImeCapabilities, ImeEvent, KeyState};
 use proxy::{Fcitx4InputContextProxy, Fcitx4InputMethodProxy};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
@@ -90,6 +90,14 @@ impl Fcitx4Backend {
 }
 
 impl ImeBackend for Fcitx4Backend {
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Fcitx4
+    }
+
+    fn capabilities(&self) -> ImeCapabilities {
+        fcitx4_capabilities()
+    }
+
     fn focus_in(&self) {
         let ctx = self.ctx.clone();
         self.rt_handle.spawn(async move {
@@ -124,12 +132,14 @@ impl ImeBackend for Fcitx4Backend {
     }
 
     fn set_surrounding_text(&self, text: &str, cursor: i32, anchor: i32) {
-        log::debug!(
-            "[fcitx4] set_surrounding_text ignored: '{}' cursor={} anchor={} (unsupported in native-ime 0.1)",
-            text,
-            cursor,
-            anchor
-        );
+        let ctx = self.ctx.clone();
+        let (text, cursor, anchor) = prepare_surrounding_text(text, cursor, anchor);
+        self.rt_handle.spawn(async move {
+            let ctx = ctx.lock().await;
+            if let Err(e) = ctx.set_surrounding_text(&text, cursor, anchor).await {
+                log::warn!("[fcitx4] set_surrounding_text error: {}", e);
+            }
+        });
     }
 
     fn process_key_event(&self, keyval: u32, keycode: u32, state: u32, is_release: bool) -> bool {
@@ -297,6 +307,26 @@ fn delete_surrounding_event(offset: i32, nchar: u32) -> ImeEvent {
     ImeEvent::DeleteSurroundingText { before, after }
 }
 
+fn prepare_surrounding_text(text: &str, cursor: i32, anchor: i32) -> (String, u32, u32) {
+    (
+        text.to_owned(),
+        saturating_position(cursor),
+        saturating_position(anchor),
+    )
+}
+
+fn saturating_position(position: i32) -> u32 {
+    position.max(0) as u32
+}
+
+fn fcitx4_capabilities() -> ImeCapabilities {
+    ImeCapabilities::SURROUNDING_TEXT
+        | ImeCapabilities::DELETE_SURROUNDING_TEXT
+        | ImeCapabilities::PREEDIT
+        | ImeCapabilities::COMMIT
+        | ImeCapabilities::FORWARD_KEY
+}
+
 fn send_event(tx: &Sender<ImeEvent>, event: ImeEvent) {
     if let Err(e) = tx.try_send(event) {
         log::warn!("[fcitx4] event queue full, dropping event: {}", e);
@@ -346,5 +376,30 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn prepares_surrounding_text_with_saturating_cursor_and_anchor() {
+        assert_eq!(
+            prepare_surrounding_text("hello", -3, 7),
+            ("hello".to_owned(), 0, 7)
+        );
+        assert_eq!(
+            prepare_surrounding_text("hello", i32::MAX, i32::MIN),
+            ("hello".to_owned(), i32::MAX as u32, 0)
+        );
+    }
+
+    #[test]
+    fn reports_fcitx4_surrounding_text_capabilities_without_content_type() {
+        let caps = fcitx4_capabilities();
+        let expected = ImeCapabilities::SURROUNDING_TEXT
+            | ImeCapabilities::DELETE_SURROUNDING_TEXT
+            | ImeCapabilities::PREEDIT
+            | ImeCapabilities::COMMIT
+            | ImeCapabilities::FORWARD_KEY;
+
+        assert_eq!(caps, expected);
+        assert_eq!(caps.bits() & ImeCapabilities::CONTENT_TYPE.bits(), 0);
     }
 }

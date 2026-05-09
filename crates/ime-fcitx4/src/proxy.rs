@@ -30,6 +30,8 @@ pub trait Fcitx4InputContext {
 
     async fn set_cursor_rect(&self, x: i32, y: i32, w: i32, h: i32) -> zbus::Result<()>;
     async fn set_capacity(&self, caps: u32) -> zbus::Result<()>;
+    async fn set_surrounding_text(&self, text: &str, cursor: u32, anchor: u32) -> zbus::Result<()>;
+    async fn set_surrounding_text_position(&self, cursor: u32, anchor: u32) -> zbus::Result<()>;
 
     async fn process_key_event(
         &self,

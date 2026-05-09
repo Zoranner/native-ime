@@ -1,4 +1,4 @@
-use crate::types::{ContentType, CursorRect};
+use crate::types::{BackendKind, ContentType, CursorRect, ImeCapabilities};
 
 /// 平台输入法 backend 接口
 ///
@@ -7,6 +7,16 @@ use crate::types::{ContentType, CursorRect};
 /// 所有方法都可以从非 tokio 线程调用（例如游戏引擎主线程）。
 /// 实现者自行负责将异步 D-Bus 调用桥接到内部运行时。
 pub trait ImeBackend: Send + 'static {
+    /// backend 类型。默认 Unknown，避免旧实现误报具体框架。
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Unknown
+    }
+
+    /// backend 能力位。默认空集合，调用方必须按保守路径处理。
+    fn capabilities(&self) -> ImeCapabilities {
+        ImeCapabilities::NONE
+    }
+
     /// 通知输入法：文本输入框获得焦点
     fn focus_in(&self);
 

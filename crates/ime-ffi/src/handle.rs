@@ -1,7 +1,9 @@
 //! ImeHandle：C ABI 层的不透明句柄
 
 use crossbeam_channel::Sender;
-use ime_core::{ImeEngine, ImeEvent};
+use ime_core::{
+    BackendKind, ContentType, CursorRect, ImeBackend, ImeCapabilities, ImeEngine, ImeEvent,
+};
 
 pub struct ImeHandle {
     engine: ImeEngine,
@@ -58,16 +60,28 @@ impl ImeHandle {
         self.engine.focus_in();
     }
 
+    pub fn backend_kind(&self) -> BackendKind {
+        self.engine.backend_kind()
+    }
+
+    pub fn capabilities(&self) -> ImeCapabilities {
+        self.engine.capabilities()
+    }
+
     pub fn focus_out(&self) {
         self.engine.focus_out();
     }
 
-    pub fn set_cursor_rect(&self, rect: ime_core::CursorRect) {
+    pub fn set_cursor_rect(&self, rect: CursorRect) {
         self.engine.set_cursor_rect(rect);
     }
 
     pub fn set_surrounding_text(&self, text: &str, cursor: i32, anchor: i32) {
         self.engine.set_surrounding_text(text, cursor, anchor);
+    }
+
+    pub fn set_content_type(&self, content_type: ContentType) {
+        self.engine.set_content_type(content_type);
     }
 
     pub fn reset(&self) {
@@ -90,7 +104,7 @@ impl ImeHandle {
     }
 }
 
-async fn try_fcitx5(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeBackend>> {
+async fn try_fcitx5(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ImeBackend>> {
     match ime_fcitx5::Fcitx5Backend::connect(event_tx).await {
         Ok(backend) => Some(Box::new(backend)),
         Err(e) => {
@@ -100,7 +114,7 @@ async fn try_fcitx5(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeB
     }
 }
 
-async fn try_fcitx4(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeBackend>> {
+async fn try_fcitx4(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ImeBackend>> {
     match ime_fcitx4::Fcitx4Backend::connect(event_tx).await {
         Ok(backend) => Some(Box::new(backend)),
         Err(e) => {
@@ -110,7 +124,7 @@ async fn try_fcitx4(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeB
     }
 }
 
-async fn try_ibus(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ime_core::ImeBackend>> {
+async fn try_ibus(event_tx: Sender<ImeEvent>) -> Option<Box<dyn ImeBackend>> {
     match ime_ibus::IBusBackend::connect(event_tx).await {
         Ok(backend) => Some(Box::new(backend)),
         Err(e) => {

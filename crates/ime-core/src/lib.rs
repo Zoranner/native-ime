@@ -4,4 +4,4 @@ pub mod types;
 
 pub use backend::ImeBackend;
 pub use engine::ImeEngine;
-pub use types::{ContentType, CursorRect, ImeEvent, KeyState};
+pub use types::{BackendKind, ContentType, CursorRect, ImeCapabilities, ImeEvent, KeyState};

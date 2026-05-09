@@ -13,10 +13,27 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use futures_util::StreamExt;
-use ime_core::{CursorRect, ImeBackend, ImeEvent, KeyState};
+use ime_core::{
+    BackendKind, ContentType, CursorRect, ImeBackend, ImeCapabilities, ImeEvent, KeyState,
+};
 use proxy::{IBusBusProxy, IBusInputContextProxy};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
+use zbus::zvariant::{Array, Signature, Value};
+
+const IBUS_CAP_PREEDIT_TEXT: u32 = 1 << 0;
+const IBUS_CAP_FOCUS: u32 = 1 << 3;
+const IBUS_CAP_SURROUNDING_TEXT: u32 = 1 << 5;
+
+const IBUS_INPUT_PURPOSE_FREE_FORM: u32 = 0;
+const IBUS_INPUT_PURPOSE_NUMBER: u32 = 3;
+const IBUS_INPUT_PURPOSE_PHONE: u32 = 4;
+const IBUS_INPUT_PURPOSE_URL: u32 = 5;
+const IBUS_INPUT_PURPOSE_EMAIL: u32 = 6;
+const IBUS_INPUT_PURPOSE_PASSWORD: u32 = 8;
+
+const IBUS_INPUT_HINT_NONE: u32 = 0;
+const IBUS_INPUT_HINT_NO_SPELLCHECK: u32 = 1 << 1;
 
 pub struct IBusBackend {
     ctx: Arc<Mutex<IBusInputContextProxy<'static>>>,
@@ -49,11 +66,8 @@ impl IBusBackend {
             .build()
             .await?;
 
-        // 能力 flags：
-        //   IBUS_CAP_PREEDIT_TEXT     = 1
-        //   IBUS_CAP_FOCUS            = 8
-        //   IBUS_CAP_SURROUNDING_TEXT = 32
-        ctx.set_capabilities(1 | 8 | 32).await?;
+        ctx.set_capabilities(IBUS_CAP_PREEDIT_TEXT | IBUS_CAP_FOCUS | IBUS_CAP_SURROUNDING_TEXT)
+            .await?;
 
         let ctx = Arc::new(Mutex::new(ctx));
         let rt_handle = Handle::current();
@@ -74,6 +88,14 @@ impl IBusBackend {
 }
 
 impl ImeBackend for IBusBackend {
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::IBus
+    }
+
+    fn capabilities(&self) -> ImeCapabilities {
+        ibus_capabilities()
+    }
+
     fn focus_in(&self) {
         let ctx = self.ctx.clone();
         self.rt_handle.spawn(async move {
@@ -108,14 +130,27 @@ impl ImeBackend for IBusBackend {
     }
 
     fn set_surrounding_text(&self, text: &str, cursor: i32, anchor: i32) {
-        // 明确降级：IBus surrounding text 需要构造 IBusText GVariant 并调用
-        // SetSurroundingText。当前版本不声明支持该能力，避免宿主误以为上下文已生效。
-        log::debug!(
-            "[ibus] set_surrounding_text ignored: '{}' cursor={} anchor={} (unsupported in native-ime 0.1)",
-            text,
-            cursor,
-            anchor
-        );
+        let ctx = self.ctx.clone();
+        let ibus_text = build_ibus_text(text);
+        let cursor = cursor.max(0) as u32;
+        let anchor = anchor.max(0) as u32;
+        self.rt_handle.spawn(async move {
+            let ctx = ctx.lock().await;
+            if let Err(e) = ctx.set_surrounding_text(ibus_text, cursor, anchor).await {
+                log::warn!("[ibus] set_surrounding_text error: {}", e);
+            }
+        });
+    }
+
+    fn set_content_type(&self, content_type: ContentType) {
+        let ctx = self.ctx.clone();
+        let (purpose, hints) = ibus_content_type(content_type);
+        self.rt_handle.spawn(async move {
+            let ctx = ctx.lock().await;
+            if let Err(e) = ctx.set_content_type(purpose, hints).await {
+                log::warn!("[ibus] set_content_type error: {}", e);
+            }
+        });
     }
 
     fn process_key_event(&self, keyval: u32, keycode: u32, state: u32, is_release: bool) -> bool {
@@ -271,6 +306,48 @@ fn send_event(tx: &Sender<ImeEvent>, event: ImeEvent) {
     }
 }
 
+fn build_ibus_text(text: &str) -> Value<'static> {
+    let attachments = std::collections::HashMap::<String, Value<'static>>::new();
+    let attrs = build_empty_ibus_attr_list();
+
+    Value::new(("IBusText", attachments, text.to_owned(), attrs))
+}
+
+fn build_empty_ibus_attr_list() -> Value<'static> {
+    let attachments = std::collections::HashMap::<String, Value<'static>>::new();
+    let attributes = Array::new(&Signature::Structure(
+        vec![
+            Signature::U32,
+            Signature::U32,
+            Signature::I32,
+            Signature::U32,
+        ]
+        .into(),
+    ));
+
+    Value::new(("IBusAttrList", attachments, Value::Array(attributes)))
+}
+
+fn ibus_content_type(content_type: ContentType) -> (u32, u32) {
+    match content_type {
+        ContentType::Normal => (IBUS_INPUT_PURPOSE_FREE_FORM, IBUS_INPUT_HINT_NONE),
+        ContentType::Password => (IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_HINT_NO_SPELLCHECK),
+        ContentType::Number => (IBUS_INPUT_PURPOSE_NUMBER, IBUS_INPUT_HINT_NONE),
+        ContentType::Phone => (IBUS_INPUT_PURPOSE_PHONE, IBUS_INPUT_HINT_NONE),
+        ContentType::Url => (IBUS_INPUT_PURPOSE_URL, IBUS_INPUT_HINT_NO_SPELLCHECK),
+        ContentType::Email => (IBUS_INPUT_PURPOSE_EMAIL, IBUS_INPUT_HINT_NO_SPELLCHECK),
+    }
+}
+
+fn ibus_capabilities() -> ImeCapabilities {
+    ImeCapabilities::PREEDIT
+        | ImeCapabilities::COMMIT
+        | ImeCapabilities::FORWARD_KEY
+        | ImeCapabilities::DELETE_SURROUNDING_TEXT
+        | ImeCapabilities::SURROUNDING_TEXT
+        | ImeCapabilities::CONTENT_TYPE
+}
+
 /// 从 IBusText GVariant 提取文本字符串
 ///
 /// IBus D-Bus 信号中 text 参数类型为 `v`（variant），内部包裹 IBusText 结构体。
@@ -298,4 +375,79 @@ fn extract_ibus_text_string(v: &zbus::zvariant::Value<'_>) -> String {
     }
 
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_ibus_text_matches_extract_ibus_text_string() {
+        let value = build_ibus_text("hello 输入法");
+
+        assert_eq!(extract_ibus_text_string(&value), "hello 输入法");
+    }
+
+    #[test]
+    fn build_ibus_text_uses_ibus_serializable_shape() {
+        let value = build_ibus_text("abc");
+        let Value::Structure(text) = value else {
+            panic!("IBusText should be encoded as a structure");
+        };
+
+        let fields = text.fields();
+        assert_eq!(fields.len(), 4);
+        assert!(matches!(&fields[0], Value::Str(name) if name.as_str() == "IBusText"));
+        assert!(matches!(&fields[1], Value::Dict(_)));
+        assert!(matches!(&fields[2], Value::Str(text) if text.as_str() == "abc"));
+
+        let Value::Value(attrs) = &fields[3] else {
+            panic!("IBusText attrs field should be a variant");
+        };
+        let Value::Structure(attrs) = attrs.as_ref() else {
+            panic!("IBusText attrs variant should wrap IBusAttrList");
+        };
+        assert!(matches!(&attrs.fields()[0], Value::Str(name) if name.as_str() == "IBusAttrList"));
+    }
+
+    #[test]
+    fn content_type_maps_to_ibus_purpose_and_hints() {
+        assert_eq!(
+            ibus_content_type(ContentType::Normal),
+            (IBUS_INPUT_PURPOSE_FREE_FORM, IBUS_INPUT_HINT_NONE)
+        );
+        assert_eq!(
+            ibus_content_type(ContentType::Password),
+            (IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_HINT_NO_SPELLCHECK)
+        );
+        assert_eq!(
+            ibus_content_type(ContentType::Number),
+            (IBUS_INPUT_PURPOSE_NUMBER, IBUS_INPUT_HINT_NONE)
+        );
+        assert_eq!(
+            ibus_content_type(ContentType::Phone),
+            (IBUS_INPUT_PURPOSE_PHONE, IBUS_INPUT_HINT_NONE)
+        );
+        assert_eq!(
+            ibus_content_type(ContentType::Url),
+            (IBUS_INPUT_PURPOSE_URL, IBUS_INPUT_HINT_NO_SPELLCHECK)
+        );
+        assert_eq!(
+            ibus_content_type(ContentType::Email),
+            (IBUS_INPUT_PURPOSE_EMAIL, IBUS_INPUT_HINT_NO_SPELLCHECK)
+        );
+    }
+
+    #[test]
+    fn reports_ibus_text_context_capabilities() {
+        assert_eq!(
+            ibus_capabilities(),
+            ImeCapabilities::PREEDIT
+                | ImeCapabilities::COMMIT
+                | ImeCapabilities::FORWARD_KEY
+                | ImeCapabilities::DELETE_SURROUNDING_TEXT
+                | ImeCapabilities::SURROUNDING_TEXT
+                | ImeCapabilities::CONTENT_TYPE
+        );
+    }
 }

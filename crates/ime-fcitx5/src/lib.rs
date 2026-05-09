@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use futures_util::StreamExt;
-use ime_core::{CursorRect, ImeBackend, ImeEvent, KeyState};
+use ime_core::{BackendKind, CursorRect, ImeBackend, ImeCapabilities, ImeEvent, KeyState};
 use proxy::{Fcitx5InputContextProxy, Fcitx5InputMethodProxy};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
@@ -82,6 +82,14 @@ impl Fcitx5Backend {
 }
 
 impl ImeBackend for Fcitx5Backend {
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Fcitx5
+    }
+
+    fn capabilities(&self) -> ImeCapabilities {
+        fcitx5_capabilities()
+    }
+
     fn focus_in(&self) {
         let ctx = self.ctx.clone();
         self.rt_handle.spawn(async move {
@@ -254,5 +262,28 @@ async fn signal_loop(
 fn send_event(tx: &Sender<ImeEvent>, event: ImeEvent) {
     if let Err(e) = tx.try_send(event) {
         log::warn!("[fcitx5] event queue full, dropping event: {}", e);
+    }
+}
+
+fn fcitx5_capabilities() -> ImeCapabilities {
+    ImeCapabilities::PREEDIT
+        | ImeCapabilities::COMMIT
+        | ImeCapabilities::FORWARD_KEY
+        | ImeCapabilities::SURROUNDING_TEXT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_fcitx5_surrounding_text_capabilities() {
+        assert_eq!(
+            fcitx5_capabilities(),
+            ImeCapabilities::PREEDIT
+                | ImeCapabilities::COMMIT
+                | ImeCapabilities::FORWARD_KEY
+                | ImeCapabilities::SURROUNDING_TEXT
+        );
     }
 }

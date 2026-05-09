@@ -12,7 +12,7 @@
 use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::backend::ImeBackend;
-use crate::types::{ContentType, CursorRect, ImeEvent};
+use crate::types::{BackendKind, ContentType, CursorRect, ImeCapabilities, ImeEvent};
 
 pub struct ImeEngine {
     backend: Box<dyn ImeBackend>,
@@ -29,6 +29,14 @@ impl ImeEngine {
     }
 
     // --- 宿主调用接口 ---
+
+    pub fn backend_kind(&self) -> BackendKind {
+        self.backend.backend_kind()
+    }
+
+    pub fn capabilities(&self) -> ImeCapabilities {
+        self.backend.capabilities()
+    }
 
     pub fn focus_in(&self) {
         self.backend.focus_in();
@@ -79,13 +87,21 @@ mod tests {
     use crossbeam_channel::{bounded, Sender};
 
     use super::*;
-    use crate::types::KeyState;
+    use crate::types::{BackendKind, ImeCapabilities, KeyState};
 
     struct RecordingBackend {
         tx: Sender<ImeEvent>,
     }
 
     impl ImeBackend for RecordingBackend {
+        fn backend_kind(&self) -> BackendKind {
+            BackendKind::Fcitx5
+        }
+
+        fn capabilities(&self) -> ImeCapabilities {
+            ImeCapabilities::PREEDIT | ImeCapabilities::COMMIT | ImeCapabilities::FORWARD_KEY
+        }
+
         fn focus_in(&self) {}
 
         fn focus_out(&self) {}
@@ -149,5 +165,18 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn backend_diagnostics_are_forwarded_from_backend() {
+        let (tx, rx) = bounded(1);
+        let engine = ImeEngine::new(Box::new(RecordingBackend { tx }), rx);
+
+        assert_eq!(engine.backend_kind(), BackendKind::Fcitx5);
+        assert_eq!(
+            engine.capabilities().bits(),
+            (ImeCapabilities::PREEDIT | ImeCapabilities::COMMIT | ImeCapabilities::FORWARD_KEY)
+                .bits()
+        );
     }
 }

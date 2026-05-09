@@ -36,6 +36,17 @@ pub trait IBusInputContext {
     /// 设置 IME 能力 flags
     async fn set_capabilities(&self, caps: u32) -> zbus::Result<()>;
 
+    /// 设置光标周围文本上下文
+    async fn set_surrounding_text(
+        &self,
+        text: zbus::zvariant::Value<'_>,
+        cursor_pos: u32,
+        anchor_pos: u32,
+    ) -> zbus::Result<()>;
+
+    /// 设置输入内容类型提示
+    async fn set_content_type(&self, purpose: u32, hints: u32) -> zbus::Result<()>;
+
     /// 通知输入法：输入框获得焦点
     async fn focus_in(&self) -> zbus::Result<()>;
 

@@ -113,6 +113,75 @@ pub unsafe extern "C" fn ime_set_surrounding_text(
     });
 }
 
+/// 返回当前 backend 类型。
+///
+/// 返回值：
+/// - 0 = None / Unknown
+/// - 1 = Fcitx5
+/// - 2 = Fcitx4
+/// - 3 = IBus
+///
+/// # Safety
+/// `handle` 必须是有效的非 null 指针；null 返回 0。
+#[no_mangle]
+pub unsafe extern "C" fn ime_backend_kind(handle: *mut ImeHandle) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if handle.is_null() {
+            return 0i32;
+        }
+        let h = &*handle;
+        h.backend_kind().as_abi()
+    }));
+    result.unwrap_or(0)
+}
+
+/// 返回当前 backend 能力位集合。
+///
+/// 位定义：
+/// - bit 0 = Preedit event
+/// - bit 1 = Commit event
+/// - bit 2 = ForwardKey event
+/// - bit 3 = DeleteSurroundingText event
+/// - bit 4 = set_surrounding_text
+/// - bit 5 = set_content_type
+///
+/// # Safety
+/// `handle` 必须是有效的非 null 指针；null 返回 0。
+#[no_mangle]
+pub unsafe extern "C" fn ime_capabilities(handle: *mut ImeHandle) -> u32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if handle.is_null() {
+            return 0u32;
+        }
+        let h = &*handle;
+        h.capabilities().bits()
+    }));
+    result.unwrap_or(0)
+}
+
+/// 更新输入类型提示。
+///
+/// `content_type`：
+/// - 0 = Normal
+/// - 1 = Password
+/// - 2 = Number
+/// - 3 = Phone
+/// - 4 = Url
+/// - 5 = Email
+///
+/// null handle 或未知枚举值会被忽略。
+///
+/// # Safety
+/// `handle` 必须是有效的非 null 指针。
+#[no_mangle]
+pub unsafe extern "C" fn ime_set_content_type(handle: *mut ImeHandle, content_type: i32) {
+    with_handle(handle, |h| {
+        if let Some(content_type) = content_type_from_abi(content_type) {
+            h.set_content_type(content_type);
+        }
+    });
+}
+
 /// 重置输入状态（焦点切换时调用）。
 ///
 /// # Safety
@@ -224,6 +293,18 @@ unsafe fn with_handle<F: FnOnce(&ImeHandle)>(handle: *mut ImeHandle, f: F) {
     let _ = catch_unwind(AssertUnwindSafe(|| f(&*handle)));
 }
 
+fn content_type_from_abi(value: i32) -> Option<ime_core::ContentType> {
+    match value {
+        0 => Some(ime_core::ContentType::Normal),
+        1 => Some(ime_core::ContentType::Password),
+        2 => Some(ime_core::ContentType::Number),
+        3 => Some(ime_core::ContentType::Phone),
+        4 => Some(ime_core::ContentType::Url),
+        5 => Some(ime_core::ContentType::Email),
+        _ => None,
+    }
+}
+
 fn fill_event_data(data: &mut ImeEventData, event: ime_core::ImeEvent) {
     // 只重置可能残留脏值的标量字段；text 由 write_text 按需写入（含 null 终止符）
     data.event_type = 0;
@@ -288,7 +369,10 @@ mod tests {
             ime_focus_out(std::ptr::null_mut());
             ime_set_cursor_rect(std::ptr::null_mut(), 1, 2, 3, 4);
             ime_set_surrounding_text(std::ptr::null_mut(), std::ptr::null(), 0, 0);
+            ime_set_content_type(std::ptr::null_mut(), 999);
             ime_reset(std::ptr::null_mut());
+            assert_eq!(ime_backend_kind(std::ptr::null_mut()), 0);
+            assert_eq!(ime_capabilities(std::ptr::null_mut()), 0);
             assert_eq!(ime_process_key_event(std::ptr::null_mut(), 0, 0, 0, 0), 0);
         }
 
@@ -348,5 +432,13 @@ mod tests {
         assert_eq!(event.cursor_end, 0);
         assert_eq!(event.param1, 0);
         assert_eq!(event.param2, 0);
+    }
+
+    #[test]
+    fn invalid_content_type_values_are_ignored() {
+        assert!(content_type_from_abi(0).is_some());
+        assert!(content_type_from_abi(5).is_some());
+        assert!(content_type_from_abi(-1).is_none());
+        assert!(content_type_from_abi(7).is_none());
     }
 }
