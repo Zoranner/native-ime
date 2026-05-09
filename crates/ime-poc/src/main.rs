@@ -4,6 +4,7 @@
 //! 用法：
 //!   RUST_LOG=debug cargo run -p ime-poc
 //!   RUST_LOG=debug cargo run -p ime-poc -- --interactive
+//!   RUST_LOG=debug cargo run -p ime-poc -- --surrounding-text "hello" --cursor 5
 //!
 //! 运行后：
 //!   1. 默认自动发送一组测试按键（n i h a o + Return）
@@ -18,6 +19,14 @@ use ime_core::{BackendKind, ImeCapabilities, ImeEngine, ImeEvent};
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+
+    let args = match PocArgs::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(e) => {
+            log::error!("[POC] {}", e);
+            return;
+        }
+    };
 
     log::info!("[POC] native-ime Linux PoC starting...");
 
@@ -52,8 +61,9 @@ async fn main() {
         width: 1,
         height: 20,
     });
+    maybe_set_surrounding_text(&engine, args.surrounding_text.as_ref());
 
-    if std::env::args().any(|arg| arg == "--interactive") {
+    if args.interactive {
         log::info!(
             "[POC] Focus in, cursor rect set. Interactive mode: type text lines, Ctrl-D/Ctrl-Z to exit."
         );
@@ -70,6 +80,115 @@ async fn main() {
 
     engine.focus_out();
     log::info!("[POC] Done.");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurroundingTextArgs {
+    text: String,
+    cursor: i32,
+    anchor: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PocArgs {
+    interactive: bool,
+    surrounding_text: Option<SurroundingTextArgs>,
+}
+
+impl PocArgs {
+    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut parsed = Self::default();
+        let mut surrounding_text: Option<String> = None;
+        let mut cursor: Option<i32> = None;
+        let mut anchor: Option<i32> = None;
+        let mut iter = args.into_iter();
+
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--interactive" => parsed.interactive = true,
+                "--surrounding-text" => {
+                    let text = next_arg(&mut iter, "--surrounding-text")?;
+                    surrounding_text = Some(text);
+                }
+                "--cursor" => {
+                    let value = next_arg(&mut iter, "--cursor")?;
+                    cursor = Some(parse_non_negative_i32("--cursor", &value)?);
+                }
+                "--anchor" => {
+                    let value = next_arg(&mut iter, "--anchor")?;
+                    anchor = Some(parse_non_negative_i32("--anchor", &value)?);
+                }
+                "--help" | "-h" => return Err(usage()),
+                _ => return Err(format!("Unknown argument: {arg}\n{}", usage())),
+            }
+        }
+
+        if surrounding_text.is_none() && (cursor.is_some() || anchor.is_some()) {
+            return Err("--cursor/--anchor require --surrounding-text".to_string());
+        }
+
+        parsed.surrounding_text = surrounding_text.map(|text| {
+            let default_cursor = i32::try_from(text.len()).unwrap_or(i32::MAX);
+            let cursor = cursor.unwrap_or(default_cursor);
+            let anchor = anchor.unwrap_or(cursor);
+
+            SurroundingTextArgs {
+                text,
+                cursor,
+                anchor,
+            }
+        });
+
+        Ok(parsed)
+    }
+}
+
+fn next_arg(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    iter.next()
+        .ok_or_else(|| format!("{flag} requires a value\n{}", usage()))
+}
+
+fn parse_non_negative_i32(flag: &str, value: &str) -> Result<i32, String> {
+    let parsed = value
+        .parse::<i32>()
+        .map_err(|_| format!("{flag} must be a non-negative i32 byte offset: {value}"))?;
+
+    if parsed < 0 {
+        return Err(format!(
+            "{flag} must be a non-negative i32 byte offset: {value}"
+        ));
+    }
+
+    Ok(parsed)
+}
+
+fn usage() -> String {
+    "Usage: ime-poc [--interactive] [--surrounding-text <text> [--cursor <n>] [--anchor <n>]]"
+        .to_string()
+}
+
+fn maybe_set_surrounding_text(engine: &ImeEngine, args: Option<&SurroundingTextArgs>) {
+    let Some(args) = args else {
+        return;
+    };
+
+    log::info!(
+        "[POC] Requested surrounding text: byte_len={} cursor={} anchor={}",
+        args.text.len(),
+        args.cursor,
+        args.anchor
+    );
+
+    let caps = engine.capabilities();
+    if caps.bits() & ImeCapabilities::SURROUNDING_TEXT.bits() == 0 {
+        log::warn!(
+            "[POC] Backend capability missing: surrounding_text. Skipping set_surrounding_text."
+        );
+        return;
+    }
+
+    engine.set_surrounding_text(&args.text, args.cursor, args.anchor);
+    log::info!("[POC] set_surrounding_text called.");
 }
 
 async fn run_interactive(engine: &ImeEngine) {
@@ -289,6 +408,63 @@ mod tests {
     #[test]
     fn rejects_non_ascii_chars_without_guessing_keyboard_layout() {
         assert_eq!(char_to_basic_x11_keysym('你'), None);
+    }
+
+    #[test]
+    fn parses_surrounding_text_with_default_offsets() {
+        let args = PocArgs::parse(["--surrounding-text", "你a"].map(String::from)).unwrap();
+
+        assert_eq!(
+            args.surrounding_text,
+            Some(SurroundingTextArgs {
+                text: "你a".to_string(),
+                cursor: 4,
+                anchor: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_explicit_surrounding_text_offsets() {
+        let args = PocArgs::parse(
+            [
+                "--interactive",
+                "--surrounding-text",
+                "hello",
+                "--cursor",
+                "2",
+                "--anchor",
+                "1",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert!(args.interactive);
+        assert_eq!(
+            args.surrounding_text,
+            Some(SurroundingTextArgs {
+                text: "hello".to_string(),
+                cursor: 2,
+                anchor: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_offsets_without_surrounding_text() {
+        let err = PocArgs::parse(["--cursor", "1"].map(String::from)).unwrap_err();
+
+        assert_eq!(err, "--cursor/--anchor require --surrounding-text");
+    }
+
+    #[test]
+    fn rejects_negative_offsets() {
+        let err =
+            PocArgs::parse(["--surrounding-text", "hello", "--cursor", "-1"].map(String::from))
+                .unwrap_err();
+
+        assert!(err.contains("--cursor must be a non-negative i32 byte offset"));
     }
 
     #[test]

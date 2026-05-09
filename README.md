@@ -137,11 +137,17 @@ cargo zigbuild --release -p ime-ffi --target x86_64-unknown-linux-gnu
 RUST_LOG=debug cargo run -p ime-poc
 # 手动输入文本行并逐键发送：
 RUST_LOG=debug cargo run -p ime-poc -- --interactive
+# 设置 surrounding text 后再发送默认测试按键：
+RUST_LOG=debug cargo run -p ime-poc -- --surrounding-text "hello" --cursor 5
 ```
 
 PoC 启动后会打印当前 backend 名称、backend kind 和 capability bits；默认模式仍自动发送
 `nihao + Return`，interactive 模式只做基础 X11 keysym 映射：ASCII 字符直接使用码位，
 Return 使用 `0xff0d`，不尝试覆盖完整键盘布局。
+可通过 `--surrounding-text <text>` 在 `focus_in` 和 `set_cursor_rect` 后设置光标周围文本；
+`--cursor <n>` / `--anchor <n>` 使用 UTF-8 byte offset，未传时默认 `cursor=text.len()`、
+`anchor=cursor`。PoC 只打印文本 byte length、cursor 和 anchor；如果当前 backend 未声明
+surrounding text capability，会打印提示并跳过调用。
 
 ## 回退机制
 
