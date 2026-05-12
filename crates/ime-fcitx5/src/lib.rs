@@ -69,9 +69,12 @@ impl Fcitx5Backend {
         // 信号监听循环在当前 tokio 运行时中 spawn；
         // 通过 oneshot 等待其完成所有 D-Bus 流订阅后再返回，
         // 避免 connect() 返回后立即调用 process_key_event 时产生锁竞争
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let signal_loop_handle = rt_handle.spawn(signal_loop(ctx.clone(), event_tx, ready_tx));
-        let _ = ready_rx.await;
+        if let Err(e) = wait_signal_loop_ready(ready_rx).await {
+            signal_loop_handle.abort();
+            return Err(e);
+        }
 
         Ok(Self {
             ctx,
@@ -173,14 +176,17 @@ impl ImeBackend for Fcitx5Backend {
 async fn signal_loop(
     ctx: Arc<Mutex<Fcitx5InputContextProxy<'static>>>,
     event_tx: Sender<ImeEvent>,
-    ready_tx: tokio::sync::oneshot::Sender<()>,
+    ready_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 ) {
     let ctx_guard = ctx.lock().await;
 
     let mut commit_stream = match ctx_guard.receive_commit_string().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[fcitx5] subscribe commit-string error: {}", e);
+            let err = anyhow::anyhow!("Fcitx5 subscribe commit-string failed: {e}");
+            log::error!("[fcitx5] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -188,7 +194,10 @@ async fn signal_loop(
     let mut preedit_stream = match ctx_guard.receive_update_preedit().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[fcitx5] subscribe update-preedit error: {}", e);
+            let err = anyhow::anyhow!("Fcitx5 subscribe update-preedit failed: {e}");
+            log::error!("[fcitx5] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -196,21 +205,24 @@ async fn signal_loop(
     let mut forward_key_stream = match ctx_guard.receive_forward_key().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[fcitx5] subscribe forward-key error: {}", e);
+            let err = anyhow::anyhow!("Fcitx5 subscribe forward-key failed: {e}");
+            log::error!("[fcitx5] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
 
     // 释放锁后再发送就绪信号，确保 process_key_event 能立刻拿到锁
     drop(ctx_guard);
-    let _ = ready_tx.send(());
+    send_signal_loop_ready(ready_tx, Ok(()));
 
     loop {
         tokio::select! {
             Some(msg) = commit_stream.next() => {
                 if let Ok(args) = msg.args() {
                     let text = args.text.to_string();
-                    log::debug!("[fcitx5] commit: {:?}", text);
+                    log::debug!("[fcitx5] {}", text_event_summary("commit", &text, None));
                     send_event(&event_tx, ImeEvent::Commit { text });
                 }
             }
@@ -223,7 +235,10 @@ async fn signal_loop(
                         .map(|(t, _flags)| t.as_str())
                         .collect();
                     let cursor = args.cursor_pos;
-                    log::debug!("[fcitx5] preedit: {:?} cursor={}", text, cursor);
+                    log::debug!(
+                        "[fcitx5] {}",
+                        text_event_summary("preedit", &text, Some(cursor))
+                    );
                     if text.is_empty() {
                         send_event(&event_tx, ImeEvent::PreeditEnd);
                     } else {
@@ -238,8 +253,8 @@ async fn signal_loop(
             Some(msg) = forward_key_stream.next() => {
                 if let Ok(args) = msg.args() {
                     log::debug!(
-                        "[fcitx5] forward-key: keyval=0x{:x} state=0x{:x} release={}",
-                        args.keyval, args.state, args.is_release
+                        "[fcitx5] {}",
+                        forward_key_summary(args.state, args.is_release)
                     );
                     // Fcitx5 将 is_release 作为独立参数传入，而 IBus 将其编码在 state bit 30。
                     // 统一编码为 KeyState::RELEASE，宿主只需检查一个字段即可。
@@ -272,6 +287,42 @@ fn fcitx5_capabilities() -> ImeCapabilities {
         | ImeCapabilities::SURROUNDING_TEXT
 }
 
+fn text_event_summary(event_type: &str, text: &str, cursor: Option<i32>) -> String {
+    let mut summary = format!(
+        "{event_type} byte_len={} char_count={}",
+        text.len(),
+        text.chars().count()
+    );
+
+    if let Some(cursor) = cursor {
+        summary.push_str(&format!(" cursor={cursor}"));
+    }
+
+    summary
+}
+
+fn forward_key_summary(state: u32, is_release: bool) -> String {
+    format!("forward-key state=0x{state:x} release={is_release}")
+}
+
+fn send_signal_loop_ready(
+    ready_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    result: anyhow::Result<()>,
+) {
+    let _ = ready_tx.send(result);
+}
+
+async fn wait_signal_loop_ready(
+    ready_rx: tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    match ready_rx.await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "Fcitx5 signal loop ended before initialization completed"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +336,50 @@ mod tests {
                 | ImeCapabilities::FORWARD_KEY
                 | ImeCapabilities::SURROUNDING_TEXT
         );
+    }
+
+    #[test]
+    fn formats_text_event_without_content() {
+        let summary = text_event_summary("commit", "密码a", None);
+
+        assert_eq!(summary, "commit byte_len=7 char_count=3");
+        assert!(!summary.contains("密码a"));
+    }
+
+    #[test]
+    fn formats_preedit_event_with_cursor_without_content() {
+        let summary = text_event_summary("preedit", "候选", Some(2));
+
+        assert_eq!(summary, "preedit byte_len=6 char_count=2 cursor=2");
+        assert!(!summary.contains("候选"));
+    }
+
+    #[test]
+    fn formats_forward_key_without_keyval() {
+        let summary = forward_key_summary(KeyState::SHIFT, true);
+
+        assert_eq!(summary, "forward-key state=0x1 release=true");
+        assert!(!summary.contains("ff0d"));
+    }
+
+    #[tokio::test]
+    async fn propagates_signal_loop_initialization_failure() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        send_signal_loop_ready(ready_tx, Err(anyhow::anyhow!("subscribe preedit failed")));
+
+        let err = wait_signal_loop_ready(ready_rx).await.unwrap_err();
+        assert!(err.to_string().contains("subscribe preedit failed"));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_signal_loop_initialization_result() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+        drop(ready_tx);
+
+        let err = wait_signal_loop_ready(ready_rx).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Fcitx5 signal loop ended before initialization completed"));
     }
 }

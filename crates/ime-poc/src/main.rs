@@ -5,11 +5,12 @@
 //!   RUST_LOG=debug cargo run -p ime-poc
 //!   RUST_LOG=debug cargo run -p ime-poc -- --interactive
 //!   RUST_LOG=debug cargo run -p ime-poc -- --surrounding-text "hello" --cursor 5
+//!   RUST_LOG=debug cargo run -p ime-poc -- --log-text --interactive
 //!
 //! 运行后：
 //!   1. 默认自动发送一组测试按键（n i h a o + Return）
 //!   2. interactive 模式从 stdin 读取普通文本行并逐字符发送
-//!   3. 观察 backend diagnostics 与 process_key_event 输出
+//!   3. 观察 backend diagnostics 与 process_key_event 输出；默认日志不打印真实文本
 //!   4. 当输入法产生候选词时，观察 Preedit / Commit 事件
 
 use std::io::{self, BufRead};
@@ -61,22 +62,22 @@ async fn main() {
         width: 1,
         height: 20,
     });
-    maybe_set_surrounding_text(&engine, args.surrounding_text.as_ref());
+    maybe_set_surrounding_text(&engine, args.surrounding_text.as_ref(), args.log_text);
 
     if args.interactive {
         log::info!(
             "[POC] Focus in, cursor rect set. Interactive mode: type text lines, Ctrl-D/Ctrl-Z to exit."
         );
-        run_interactive(&engine).await;
+        run_interactive(&engine, args.log_text).await;
     } else {
-        log::info!("[POC] Focus in, cursor rect set. Sending test key sequence: nihao + Return");
-        send_text_sequence(&engine, "nihao\n").await;
+        log::info!("[POC] Focus in, cursor rect set. Sending default test key sequence.");
+        send_text_sequence(&engine, "nihao\n", args.log_text).await;
     }
 
     // 等待剩余异步事件
     log::info!("[POC] Waiting for remaining events (2s)...");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    drain_events(&engine);
+    drain_events(&engine, args.log_text);
 
     engine.focus_out();
     log::info!("[POC] Done.");
@@ -92,6 +93,7 @@ struct SurroundingTextArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PocArgs {
     interactive: bool,
+    log_text: bool,
     surrounding_text: Option<SurroundingTextArgs>,
 }
 
@@ -106,6 +108,7 @@ impl PocArgs {
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--interactive" => parsed.interactive = true,
+                "--log-text" => parsed.log_text = true,
                 "--surrounding-text" => {
                     let text = next_arg(&mut iter, "--surrounding-text")?;
                     surrounding_text = Some(text);
@@ -163,21 +166,20 @@ fn parse_non_negative_i32(flag: &str, value: &str) -> Result<i32, String> {
 }
 
 fn usage() -> String {
-    "Usage: ime-poc [--interactive] [--surrounding-text <text> [--cursor <n>] [--anchor <n>]]"
+    "Usage: ime-poc [--interactive] [--log-text] [--surrounding-text <text> [--cursor <n>] [--anchor <n>]]"
         .to_string()
 }
 
-fn maybe_set_surrounding_text(engine: &ImeEngine, args: Option<&SurroundingTextArgs>) {
+fn maybe_set_surrounding_text(
+    engine: &ImeEngine,
+    args: Option<&SurroundingTextArgs>,
+    log_text: bool,
+) {
     let Some(args) = args else {
         return;
     };
 
-    log::info!(
-        "[POC] Requested surrounding text: byte_len={} cursor={} anchor={}",
-        args.text.len(),
-        args.cursor,
-        args.anchor
-    );
+    log::info!("[POC] {}", format_surrounding_text_request(args, log_text));
 
     let caps = engine.capabilities();
     if caps.bits() & ImeCapabilities::SURROUNDING_TEXT.bits() == 0 {
@@ -191,14 +193,14 @@ fn maybe_set_surrounding_text(engine: &ImeEngine, args: Option<&SurroundingTextA
     log::info!("[POC] set_surrounding_text called.");
 }
 
-async fn run_interactive(engine: &ImeEngine) {
+async fn run_interactive(engine: &ImeEngine, log_text: bool) {
     let stdin = io::stdin();
 
     for line in stdin.lock().lines() {
         match line {
             Ok(line) => {
-                send_text_sequence(engine, &line).await;
-                send_key(engine, 0xff0d, "Return").await;
+                send_text_sequence(engine, &line, log_text).await;
+                send_key(engine, 0xff0d, "Return", log_text).await;
             }
             Err(e) => {
                 log::error!("[POC] Failed to read stdin: {}", e);
@@ -208,39 +210,36 @@ async fn run_interactive(engine: &ImeEngine) {
     }
 }
 
-async fn send_text_sequence(engine: &ImeEngine, text: &str) {
+async fn send_text_sequence(engine: &ImeEngine, text: &str, log_text: bool) {
     for ch in text.chars() {
         match char_to_basic_x11_keysym(ch) {
-            Some(keysym) => send_key(engine, keysym, &format_char_label(ch)).await,
-            None => log::warn!(
-                "[POC] Skipping unsupported non-ASCII char {:?}; PoC only maps basic X11 keysyms",
-                ch
-            ),
+            Some(keysym) => {
+                send_key(engine, keysym, &format_char_label(ch, log_text), log_text).await
+            }
+            None => log_unsupported_char(ch, log_text),
         }
     }
 }
 
-async fn send_key(engine: &ImeEngine, keysym: u32, label: &str) {
+async fn send_key(engine: &ImeEngine, keysym: u32, label: &str, log_text: bool) {
     let handled = engine.process_key_event(keysym, 0, 0, false);
     log::info!(
-        "[POC] process_key_event '{}' (0x{:04x}) keydown: handled={}",
-        label,
-        keysym,
+        "[POC] process_key_event {} keydown: handled={}",
+        format_key_event(label, keysym, log_text),
         handled
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let handled = engine.process_key_event(keysym, 0, 0, true);
     log::info!(
-        "[POC] process_key_event '{}' (0x{:04x}) keyup: handled={}",
-        label,
-        keysym,
+        "[POC] process_key_event {} keyup: handled={}",
+        format_key_event(label, keysym, log_text),
         handled
     );
-    drain_events(engine);
+    drain_events(engine, log_text);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-    drain_events(engine);
+    drain_events(engine, log_text);
 }
 
 fn char_to_basic_x11_keysym(ch: char) -> Option<u32> {
@@ -251,12 +250,39 @@ fn char_to_basic_x11_keysym(ch: char) -> Option<u32> {
     }
 }
 
-fn format_char_label(ch: char) -> String {
+fn format_char_label(ch: char, log_text: bool) -> String {
     match ch {
         '\n' | '\r' => "Return".to_string(),
         ' ' => "Space".to_string(),
-        _ => ch.to_string(),
+        _ if log_text => ch.to_string(),
+        _ => "Character".to_string(),
     }
+}
+
+fn log_unsupported_char(ch: char, log_text: bool) {
+    if log_text {
+        log::warn!(
+            "[POC] Skipping unsupported non-ASCII char {:?}; PoC only maps basic X11 keysyms",
+            ch
+        );
+    } else {
+        log::warn!(
+            "[POC] Skipping unsupported non-ASCII char: byte_len={} char_count=1; PoC only maps basic X11 keysyms",
+            ch.len_utf8()
+        );
+    }
+}
+
+fn format_key_event(label: &str, keysym: u32, log_text: bool) -> String {
+    if log_text {
+        return format!("'{label}' (0x{keysym:04x})");
+    }
+
+    if label == "Return" || label == "Space" {
+        return label.to_string();
+    }
+
+    "Character".to_string()
 }
 
 fn format_backend_kind(kind: BackendKind) -> &'static str {
@@ -304,7 +330,54 @@ fn format_capabilities(caps: ImeCapabilities) -> String {
     format!("0x{bits:08x} [{}]", names.join(", "))
 }
 
-fn drain_events(engine: &ImeEngine) {
+fn format_text_summary(event_type: &str, text: &str) -> String {
+    format!(
+        "{event_type} byte_len={} char_count={}",
+        text.len(),
+        text.chars().count()
+    )
+}
+
+fn format_event_text(
+    event_type: &str,
+    text: &str,
+    cursor: Option<(i32, i32)>,
+    log_text: bool,
+) -> String {
+    let title = event_title(event_type);
+    let mut summary = format_text_summary(title, text);
+
+    if let Some((begin, end)) = cursor {
+        summary.push_str(&format!(" cursor=[{begin}..{end}]"));
+    }
+
+    if log_text {
+        summary.push_str(&format!(" text={text:?}"));
+    }
+
+    summary
+}
+
+fn format_surrounding_text_request(args: &SurroundingTextArgs, log_text: bool) -> String {
+    let mut summary = format_text_summary("Requested surrounding text", &args.text);
+    summary.push_str(&format!(" cursor={} anchor={}", args.cursor, args.anchor));
+
+    if log_text {
+        summary.push_str(&format!(" text={:?}", args.text));
+    }
+
+    summary
+}
+
+fn event_title(event_type: &str) -> &'static str {
+    match event_type {
+        "commit" => "Commit",
+        "preedit" => "Preedit",
+        _ => "TextEvent",
+    }
+}
+
+fn drain_events(engine: &ImeEngine, log_text: bool) {
     while let Some(event) = engine.poll_event() {
         match &event {
             ImeEvent::Preedit {
@@ -313,17 +386,23 @@ fn drain_events(engine: &ImeEngine) {
                 cursor_end,
             } => {
                 log::info!(
-                    "[POC] EVENT Preedit text={:?} cursor=[{}..{}]",
-                    text,
-                    cursor_begin,
-                    cursor_end
+                    "[POC] EVENT {}",
+                    format_event_text(
+                        "preedit",
+                        text,
+                        Some((*cursor_begin, *cursor_end)),
+                        log_text
+                    )
                 );
             }
             ImeEvent::PreeditEnd => {
                 log::info!("[POC] EVENT PreeditEnd");
             }
             ImeEvent::Commit { text } => {
-                log::info!("[POC] EVENT Commit text={:?}", text);
+                log::info!(
+                    "[POC] EVENT {}",
+                    format_event_text("commit", text, None, log_text)
+                );
             }
             ImeEvent::DeleteSurroundingText { before, after } => {
                 log::info!(
@@ -334,12 +413,19 @@ fn drain_events(engine: &ImeEngine) {
             }
             ImeEvent::ForwardKey { keyval, state } => {
                 log::info!(
-                    "[POC] EVENT ForwardKey keyval=0x{:x} state=0x{:x}",
-                    keyval,
-                    state.0
+                    "[POC] EVENT {}",
+                    format_forward_key_event(*keyval, state.0, log_text)
                 );
             }
         }
+    }
+}
+
+fn format_forward_key_event(keyval: u32, state: u32, log_text: bool) -> String {
+    if log_text {
+        format!("ForwardKey keyval=0x{keyval:x} state=0x{state:x}")
+    } else {
+        format!("ForwardKey state=0x{state:x}")
     }
 }
 
@@ -414,6 +500,7 @@ mod tests {
     fn parses_surrounding_text_with_default_offsets() {
         let args = PocArgs::parse(["--surrounding-text", "你a"].map(String::from)).unwrap();
 
+        assert!(!args.log_text);
         assert_eq!(
             args.surrounding_text,
             Some(SurroundingTextArgs {
@@ -421,6 +508,94 @@ mod tests {
                 cursor: 4,
                 anchor: 4,
             })
+        );
+    }
+
+    #[test]
+    fn parses_log_text_as_explicit_opt_in() {
+        let args = PocArgs::parse(["--log-text"].map(String::from)).unwrap();
+
+        assert!(args.log_text);
+    }
+
+    #[test]
+    fn formats_event_text_without_content_by_default() {
+        let summary = format_event_text("commit", "密码a", None, false);
+
+        assert_eq!(summary, "Commit byte_len=7 char_count=3");
+        assert!(!summary.contains("密码a"));
+    }
+
+    #[test]
+    fn formats_event_text_with_content_when_enabled() {
+        let summary = format_event_text("preedit", "候选", Some((2, 2)), true);
+
+        assert_eq!(
+            summary,
+            "Preedit byte_len=6 char_count=2 cursor=[2..2] text=\"候选\""
+        );
+    }
+
+    #[test]
+    fn formats_surrounding_text_without_content_by_default() {
+        let args = SurroundingTextArgs {
+            text: "上下文".to_string(),
+            cursor: 9,
+            anchor: 3,
+        };
+
+        let summary = format_surrounding_text_request(&args, false);
+
+        assert_eq!(
+            summary,
+            "Requested surrounding text byte_len=9 char_count=3 cursor=9 anchor=3"
+        );
+        assert!(!summary.contains("上下文"));
+    }
+
+    #[test]
+    fn formats_surrounding_text_with_content_when_enabled() {
+        let args = SurroundingTextArgs {
+            text: "上下文".to_string(),
+            cursor: 9,
+            anchor: 3,
+        };
+
+        let summary = format_surrounding_text_request(&args, true);
+
+        assert_eq!(
+            summary,
+            "Requested surrounding text byte_len=9 char_count=3 cursor=9 anchor=3 text=\"上下文\""
+        );
+    }
+
+    #[test]
+    fn formats_key_event_without_recoverable_keysym_by_default() {
+        let summary = format_key_event("a", 0x0061, false);
+
+        assert_eq!(summary, "Character");
+        assert!(!summary.contains("'a'"));
+        assert!(!summary.contains("0061"));
+    }
+
+    #[test]
+    fn formats_key_event_with_label_and_keysym_when_enabled() {
+        assert_eq!(format_key_event("a", 0x0061, true), "'a' (0x0061)");
+    }
+
+    #[test]
+    fn formats_forward_key_without_keyval_by_default() {
+        let summary = format_forward_key_event(0x0061, 0, false);
+
+        assert_eq!(summary, "ForwardKey state=0x0");
+        assert!(!summary.contains("0061"));
+    }
+
+    #[test]
+    fn formats_forward_key_with_keyval_when_enabled() {
+        assert_eq!(
+            format_forward_key_event(0x0061, 0, true),
+            "ForwardKey keyval=0x61 state=0x0"
         );
     }
 

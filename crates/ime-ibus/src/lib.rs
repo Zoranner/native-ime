@@ -75,9 +75,12 @@ impl IBusBackend {
         // 信号监听循环在当前 tokio 运行时中 spawn；
         // 通过 oneshot 等待其完成所有 D-Bus 流订阅后再返回，
         // 避免 connect() 返回后立即调用 process_key_event 时产生锁竞争
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let signal_loop_handle = rt_handle.spawn(signal_loop(ctx.clone(), event_tx, ready_tx));
-        let _ = ready_rx.await;
+        if let Err(e) = wait_signal_loop_ready(ready_rx).await {
+            signal_loop_handle.abort();
+            return Err(e);
+        }
 
         Ok(Self {
             ctx,
@@ -197,14 +200,17 @@ impl ImeBackend for IBusBackend {
 async fn signal_loop(
     ctx: Arc<Mutex<IBusInputContextProxy<'static>>>,
     event_tx: Sender<ImeEvent>,
-    ready_tx: tokio::sync::oneshot::Sender<()>,
+    ready_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 ) {
     let ctx_guard = ctx.lock().await;
 
     let mut commit_stream = match ctx_guard.receive_commit_text().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[ibus] Failed to subscribe commit-text: {}", e);
+            let err = anyhow::anyhow!("IBus subscribe commit-text failed: {e}");
+            log::error!("[ibus] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -212,7 +218,10 @@ async fn signal_loop(
     let mut preedit_stream = match ctx_guard.receive_update_preedit_text().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[ibus] Failed to subscribe update-preedit-text: {}", e);
+            let err = anyhow::anyhow!("IBus subscribe update-preedit-text failed: {e}");
+            log::error!("[ibus] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -220,7 +229,10 @@ async fn signal_loop(
     let mut hide_preedit_stream = match ctx_guard.receive_hide_preedit_text().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[ibus] Failed to subscribe hide-preedit-text: {}", e);
+            let err = anyhow::anyhow!("IBus subscribe hide-preedit-text failed: {e}");
+            log::error!("[ibus] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -228,7 +240,10 @@ async fn signal_loop(
     let mut delete_stream = match ctx_guard.receive_delete_surrounding_text().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[ibus] Failed to subscribe delete-surrounding-text: {}", e);
+            let err = anyhow::anyhow!("IBus subscribe delete-surrounding-text failed: {e}");
+            log::error!("[ibus] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
@@ -236,21 +251,24 @@ async fn signal_loop(
     let mut forward_key_stream = match ctx_guard.receive_forward_key_event().await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[ibus] Failed to subscribe forward-key-event: {}", e);
+            let err = anyhow::anyhow!("IBus subscribe forward-key-event failed: {e}");
+            log::error!("[ibus] {}", err);
+            drop(ctx_guard);
+            send_signal_loop_ready(ready_tx, Err(err));
             return;
         }
     };
 
     // 释放锁后再发送就绪信号，确保 process_key_event 能立刻拿到锁
     drop(ctx_guard);
-    let _ = ready_tx.send(());
+    send_signal_loop_ready(ready_tx, Ok(()));
 
     loop {
         tokio::select! {
             Some(msg) = commit_stream.next() => {
                 if let Ok(args) = msg.args() {
                     let text = extract_ibus_text_string(&args.text);
-                    log::debug!("[ibus] commit: {:?}", text);
+                    log::debug!("[ibus] {}", text_event_summary("commit", &text, None));
                     send_event(&event_tx, ImeEvent::Commit { text });
                 }
             }
@@ -258,7 +276,10 @@ async fn signal_loop(
                 if let Ok(args) = msg.args() {
                     let text = extract_ibus_text_string(&args.text);
                     let cursor = args.cursor_pos as i32;
-                    log::debug!("[ibus] preedit: {:?} cursor={}", text, cursor);
+                    log::debug!(
+                        "[ibus] {}",
+                        text_event_summary("preedit", &text, Some(cursor))
+                    );
                     if text.is_empty() {
                         send_event(&event_tx, ImeEvent::PreeditEnd);
                     } else {
@@ -287,7 +308,7 @@ async fn signal_loop(
             }
             Some(msg) = forward_key_stream.next() => {
                 if let Ok(args) = msg.args() {
-                    log::debug!("[ibus] forward-key: keyval=0x{:x} state=0x{:x}", args.keyval, args.state);
+                    log::debug!("[ibus] {}", forward_key_summary(args.state));
                     send_event(&event_tx, ImeEvent::ForwardKey {
                         keyval: args.keyval,
                         state: KeyState(args.state),
@@ -348,6 +369,42 @@ fn ibus_capabilities() -> ImeCapabilities {
         | ImeCapabilities::CONTENT_TYPE
 }
 
+fn text_event_summary(event_type: &str, text: &str, cursor: Option<i32>) -> String {
+    let mut summary = format!(
+        "{event_type} byte_len={} char_count={}",
+        text.len(),
+        text.chars().count()
+    );
+
+    if let Some(cursor) = cursor {
+        summary.push_str(&format!(" cursor={cursor}"));
+    }
+
+    summary
+}
+
+fn forward_key_summary(state: u32) -> String {
+    format!("forward-key state=0x{state:x}")
+}
+
+fn send_signal_loop_ready(
+    ready_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    result: anyhow::Result<()>,
+) {
+    let _ = ready_tx.send(result);
+}
+
+async fn wait_signal_loop_ready(
+    ready_rx: tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    match ready_rx.await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "IBus signal loop ended before initialization completed"
+        )),
+    }
+}
+
 /// 从 IBusText GVariant 提取文本字符串
 ///
 /// IBus D-Bus 信号中 text 参数类型为 `v`（variant），内部包裹 IBusText 结构体。
@@ -386,6 +443,30 @@ mod tests {
         let value = build_ibus_text("hello 输入法");
 
         assert_eq!(extract_ibus_text_string(&value), "hello 输入法");
+    }
+
+    #[test]
+    fn formats_text_event_without_content() {
+        let summary = text_event_summary("commit", "密码a", None);
+
+        assert_eq!(summary, "commit byte_len=7 char_count=3");
+        assert!(!summary.contains("密码a"));
+    }
+
+    #[test]
+    fn formats_preedit_event_with_cursor_without_content() {
+        let summary = text_event_summary("preedit", "候选", Some(2));
+
+        assert_eq!(summary, "preedit byte_len=6 char_count=2 cursor=2");
+        assert!(!summary.contains("候选"));
+    }
+
+    #[test]
+    fn formats_forward_key_without_keyval() {
+        let summary = forward_key_summary(KeyState::SHIFT);
+
+        assert_eq!(summary, "forward-key state=0x1");
+        assert!(!summary.contains("ff0d"));
     }
 
     #[test]
@@ -449,5 +530,29 @@ mod tests {
                 | ImeCapabilities::SURROUNDING_TEXT
                 | ImeCapabilities::CONTENT_TYPE
         );
+    }
+
+    #[tokio::test]
+    async fn propagates_signal_loop_initialization_failure() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        send_signal_loop_ready(
+            ready_tx,
+            Err(anyhow::anyhow!("subscribe forward-key failed")),
+        );
+
+        let err = wait_signal_loop_ready(ready_rx).await.unwrap_err();
+        assert!(err.to_string().contains("subscribe forward-key failed"));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_signal_loop_initialization_result() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+        drop(ready_tx);
+
+        let err = wait_signal_loop_ready(ready_rx).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("IBus signal loop ended before initialization completed"));
     }
 }

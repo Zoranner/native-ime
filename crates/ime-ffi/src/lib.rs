@@ -1,7 +1,13 @@
 //! C ABI 导出层
 //!
 //! 供任何可以加载 C 共享库的宿主使用（C#/P-Invoke、Python ctypes、Lua FFI、
-//! GDScript 等）。所有函数保证：不 panic（内部 catch_unwind）、不抛异常、线程安全。
+//! GDScript 等）。导出函数会捕获内部 panic，不跨 ABI 边界展开。
+//!
+//! # Handle 生命周期
+//!
+//! `ime_create` 返回的 handle 由宿主管理生命周期。宿主可以从任意线程调用同一个
+//! handle，但必须自行保证 `ime_destroy` 不会与任何其他 handle 调用并发执行，且同一
+//! handle 只能销毁一次。
 
 mod handle;
 
@@ -17,7 +23,7 @@ use handle::ImeHandle;
 
 /// 创建 IME 实例。
 ///
-/// 自动检测当前系统的输入法框架（Fcitx5 优先，其次 IBus）。
+/// 自动检测当前系统的输入法框架（Fcitx5 优先，其次 Fcitx 4，最后 IBus）。
 /// 返回非 null 的不透明指针表示成功；返回 null 表示初始化失败
 /// （输入法框架不可用，宿主应回退到自身的 IME 处理路径）。
 #[no_mangle]
@@ -39,6 +45,7 @@ pub extern "C" fn ime_create() -> *mut ImeHandle {
 ///
 /// # Safety
 /// `handle` 必须是由 `ime_create` 返回的有效指针，且只调用一次。
+/// 调用时不得有其他线程同时使用该 handle。
 #[no_mangle]
 pub unsafe extern "C" fn ime_destroy(handle: *mut ImeHandle) {
     if handle.is_null() {

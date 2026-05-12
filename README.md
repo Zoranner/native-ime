@@ -41,6 +41,9 @@ crates/
 `ime_process_key_event` 接受 **X11 keysym**（如字母 `'a'` = `0x0061`，回车 `0xff0d`）。
 宿主负责将自身的按键表示转换为 keysym；每种框架只需维护一份转换映射。
 
+`ime_create` 返回的 handle 由宿主管理生命周期。可以从任意线程调用同一个 handle，
+但宿主必须保证 `ime_destroy` 不会与其他 handle 调用并发执行，且同一 handle 只能销毁一次。
+
 ### backend 类型与能力位
 
 `ime_backend_kind` 返回值：
@@ -139,11 +142,15 @@ RUST_LOG=debug cargo run -p ime-poc
 RUST_LOG=debug cargo run -p ime-poc -- --interactive
 # 设置 surrounding text 后再发送默认测试按键：
 RUST_LOG=debug cargo run -p ime-poc -- --surrounding-text "hello" --cursor 5
+# 诊断时显式打印真实输入/事件文本：
+RUST_LOG=debug cargo run -p ime-poc -- --log-text --interactive
 ```
 
 PoC 启动后会打印当前 backend 名称、backend kind 和 capability bits；默认模式仍自动发送
 `nihao + Return`，interactive 模式只做基础 X11 keysym 映射：ASCII 字符直接使用码位，
-Return 使用 `0xff0d`，不尝试覆盖完整键盘布局。
+Return 使用 `0xff0d`，不尝试覆盖完整键盘布局。PoC 默认只打印事件类型、UTF-8 byte
+length、字符数、cursor/anchor 等摘要，不打印真实输入、Preedit、Commit 或 surrounding text
+内容；需要临时诊断文本本身时，必须显式传入 `--log-text`。
 可通过 `--surrounding-text <text>` 在 `focus_in` 和 `set_cursor_rect` 后设置光标周围文本；
 `--cursor <n>` / `--anchor <n>` 使用 UTF-8 byte offset，未传时默认 `cursor=text.len()`、
 `anchor=cursor`。PoC 只打印文本 byte length、cursor 和 anchor；如果当前 backend 未声明
