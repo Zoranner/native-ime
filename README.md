@@ -2,6 +2,8 @@
 
 Linux 原生 IME 客户端桥接库，供嵌入自定义渲染循环的宿主应用使用。
 
+该库是通用 Linux-only IME 辅助插件，不定义浏览器 IPC wire format、共享内存 core 或浏览器进程生命周期。
+
 目标场景：游戏引擎（Bevy、Godot 等）、跨平台 UI 框架、离屏渲染器（CEF OSR、WebView2 等）、
 以及任何自己管理渲染但需要系统输入法支持的应用。这类应用无法直接走 Wayland / X11
 窗口系统的 IME 协议（因为没有真正的系统窗口），本库通过 D-Bus 直连 IBus / Fcitx 4 / Fcitx5，
@@ -118,14 +120,7 @@ cargo build --release -p ime-ffi
 # 产物：target/release/libnative_ime.so
 ```
 
-Unity Linux 插件放置路径固定为：
-
-```text
-BrowserRenderer/Assets/Packages/Plugins/Linux/libnative_ime.so
-```
-
-构建完成后将 `libnative_ime.so` 复制到该目录。Unity 导入配置仅启用 Linux Editor
-和 Linux x86_64 Player，不会影响 Windows 链路。
+构建完成后，将 `libnative_ime.so` 复制到宿主应用自己的 native library 或插件目录。
 
 Linux 从 Windows 交叉编译（需要 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)）：
 
@@ -160,9 +155,8 @@ surrounding text capability，会打印提示并跳过调用。
 
 `ime_create` 在检测不到 IBus / Fcitx 4 / Fcitx5 时返回 null，宿主应据此回退到自己的 IME 处理路径。
 
-在 EmbeddedBrowser Unity 端，`NativeImeBridge` 只在 Linux Editor / Linux Player 中尝试加载
-`libnative_ime.so`。插件缺失、符号不匹配或 `ime_create` 返回 null 时，会继续使用现有
-`ImeModule` 的 Unity IME 路径。
+宿主应只在 Linux 环境尝试加载 `libnative_ime.so`。插件缺失、符号不匹配或 `ime_create`
+返回 null 时，宿主应回退到自己的输入处理路径。
 
 ## 当前限制
 
@@ -173,6 +167,5 @@ surrounding text capability，会打印提示并跳过调用。
   `Invalid sender`，不代表 backend 不可用。
 - IBus backend 已接通 `set_surrounding_text`、`set_content_type`、光标矩形、按键处理和
   Preedit / Commit 事件。
-- `DeleteSurroundingText` 已从 native-ime 透出到 Unity adapter，并通过 HeadlessBrowser IME
-  队列映射为 Backspace / Delete 键事件。
-- 当前 Unity 接入是 Linux-only 增强路径，不替换 Windows 或现有共享内存 IME 协议。
+- `DeleteSurroundingText` 已从 native-ime 透出到 C ABI，宿主可以映射为自己的删除语义。
+- native-ime 是 Linux-only 增强路径，不替换其他平台输入路径，也不定义宿主 IPC 协议。
